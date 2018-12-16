@@ -196,10 +196,9 @@ def minimize_dfa(dfa:DFA, start_node:int) -> DFA:
   alphabet = dfa.alphabet
   # start with a rough partition; non-match nodes form one set,
   # and each match node is distinct from all others.
-  init_sets = [set(dfa.non_match_nodes), *({n} for n in dfa.match_nodes)]
+  parts = { frozenset(dfa.non_match_nodes), *(frozenset({n}) for n in dfa.match_nodes) }
 
-  part_ids_to_parts = { id(s): s for s in init_sets }
-  node_parts = { n: s for s in part_ids_to_parts.values() for n in s }
+  node_parts = { n: s for s in parts for n in s }
 
   rev_transitions:DefaultDict[int, DefaultDict[int, Set[int]]] = defaultdict(lambda: defaultdict(set))
   for src, d in dfa.transitions.items():
@@ -209,60 +208,59 @@ def minimize_dfa(dfa:DFA, start_node:int) -> DFA:
   def validate_partition() -> None:
     for node, part in node_parts.items():
       assert node in part, (node, part)
-    parts = list(part_ids_to_parts.values())
-    for i, pr in enumerate(parts):
+    parts_l = list(parts)
+    for i, pr in enumerate(parts_l):
       for j in range(i):
-        pl = parts[j]
+        pl = parts_l[j]
         assert pl.isdisjoint(pr), (pl, pr)
 
-  PartIntersections = DefaultDict[int, Set[int]] # Optimization: types in hot functions can waste time.
-  def refine(refining_set:Set[int]) -> List[Tuple[Set[int], Set[int]]]:
+  PartIntersections = DefaultDict[FrozenSet[int], Set[int]] # Optimization: types in hot functions can waste time.
+  def refine(refining_set:Set[int]) -> List[Tuple[FrozenSet[int], FrozenSet[int]]]:
     '''
     Given refining set B, refine each set A in the partition to a pair of sets: A & B and A - B.
     Return a list of pairs for each changed set;
     one of these is a new set, the other is the mutated original.
     '''
-    # Accumulate intersection sets.
-    part_id_intersections:PartIntersections = defaultdict(set)
+    part_intersections:PartIntersections = defaultdict(set)
     for node in refining_set:
       part = node_parts[node]
-      part_id_intersections[id(part)].add(node)
-    # Split existing sets by the intersection sets.
+      part_intersections[part].add(node)
     set_pairs = []
-    for id_part, intersection in part_id_intersections.items():
-      part = part_ids_to_parts[id_part]
-      if intersection != part: # Split part into difference and intersection.
-        part_ids_to_parts[id(intersection)] = intersection
-        for x in intersection:
-          node_parts[x] = intersection
-        part -= intersection # Original part mutates to become difference.
-        set_pairs.append((intersection, part))
+    for part, intersection_mut in part_intersections.items():
+      if intersection_mut != part: # Split part into difference and intersection.
+        intersection = frozenset(intersection_mut)
+        diff = part - intersection
+        parts.remove(part)
+        parts.add(diff)
+        parts.add(intersection)
+        for n in diff:
+          node_parts[n] = diff
+        for n in intersection:
+          node_parts[n] = intersection
+        set_pairs.append((diff, intersection))
     return set_pairs
 
-  remaining = list(init_sets) # distinguishing sets used to refine the partition.
+  remaining = set(parts) # Distinguishing sets used to refine the partition.
   while remaining:
     s = remaining.pop() # a partition.
-    # Note: there seems to be a possible risk of incorrectness here:
-    # `s` is one of the partitions, and can be mutated by refine as we iterate over the alphabet.
-    # Are we sure that this is ok?
     for char in alphabet:
       # Find all nodes `m` that transition via `char` to any node `n` in `s`.
       dsts = set(chain.from_iterable(rev_transitions[node][char] for node in s))
-      #dsts_brute = [node for node in node_parts if dfa.transitions[node].get(char) in s] # brute force version is slow.
-      #assert set(dsts_brute) == dsts
+      #dsts_brute = set(node for node in partition if dfa.transitions[node].get(char) in s) # brute force version is slow.
+      #assert dsts_brute == dsts
       if not dsts: continue # no refinement.
       for a, b in refine(dsts):
         if len(a) < len(b): # Prefer the smaller set to continue refining with.
-          if a not in remaining: remaining.append(a)
-          elif b not in remaining: remaining.append(b)
+          if a not in remaining: remaining.add(a)
+          elif b not in remaining: remaining.add(b)
         else:
-          if b not in remaining: remaining.append(b)
-          elif a not in remaining: remaining.append(a)
+          if b not in remaining: remaining.add(b)
+          elif a not in remaining: remaining.add(a)
 
   validate_partition()
 
   mapping:Dict[int,int] = {}
-  for new_node, part in enumerate(sorted(sorted(p) for p in part_ids_to_parts.values()), start_node):
+  for new_node, part in enumerate(sorted(sorted(p) for p in parts), start_node):
     for old_node in part:
       assert old_node not in mapping, old_node
       mapping[old_node] = new_node
